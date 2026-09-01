@@ -6,6 +6,7 @@ from connection import ConnectionFactory, Connection
 from typing import cast
 from orchestrator import Orchestrator
 from algorithms import first_map_try, second_map_try, second_map_try_gemini, stoned_try
+from display import display
 import sys
 
 

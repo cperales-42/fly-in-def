@@ -10,6 +10,9 @@ class Zone:
     has_max_nb_drones: bool = False
     connections: list[Connection] = []
 
+class Zone:
+    has_max_nb_drones: bool = False
+
     def __init__(self,
                  name: str,
                  drones: list[Drone],
@@ -21,12 +24,26 @@ class Zone:
         self.max_nb_drones = max_nb_drones
         self.coordinates = coordinates
         self.special_options = special_options
+        self.connections: list[Connection] = []
+        self.has_max_nb_drones = False
         self.is_priority = False
         self.is_restricted = False
+        self.color = "white"
+
         if "priority" in special_options.values():
             self.is_priority = True
         elif "restricted" in special_options.values():
             self.is_restricted = True
+
+        if "color" in special_options.keys():
+            self.color = special_options["color"]
+
+    
+    def get_color(self) -> str:
+        return self.color
+
+    def get_coordinates(self) -> tuple[int, int]:
+        return self.coordinates
 
     def add_connection(self, connection: Connection) -> None:
         if (connection.get_zone_1().get_name() == self.get_name()
