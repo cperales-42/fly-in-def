@@ -79,7 +79,7 @@ def initialize(map_data: MapData) -> Orchestrator:
 
 
 def main() -> None:
-    map_data = parse_map("maps/challenger/01_the_impossible_dream.txt")
+    map_data = parse_map("maps/hard/01_maze_nightmare.txt")
     simulation = initialize(map_data)
     # second_map_try_gemini(simulation)
     stoned_try(simulation)

@@ -302,7 +302,6 @@ def stoned_try_first(o: Orchestrator) -> None:
 
 
 def get_dead_ends(zones, start, goal) -> set:
-    """Detecta callejones sin salida basándose en los nombres de las zonas (robusto ante deepcopy)."""
     adj = {z.get_name(): set() for z in zones}
     for zone in zones:
         for conn in zone.get_connections():
@@ -334,7 +333,6 @@ def get_dead_ends(zones, start, goal) -> set:
 
 
 def compute_distances_to_goal(zones, goal) -> dict:
-    """Calcula distancias reales al goal indexadas por el nombre de la zona."""
     goal_name = goal.get_name()
     distances = {goal_name: 0}
     queue = [goal]
@@ -359,8 +357,7 @@ def compute_distances_to_goal(zones, goal) -> dict:
     return distances
 
 
-def calculate_dijkstra_weights(c_zone, n_zone, dead_end_names, distances_map, weights):
-    """Calcula el coste de Dijkstra penalizando bucles y la proximidad a zonas restringidas."""
+def calculate_dijkstra_weights(c_zone, n_zone, dead_end_names, distances_map, weights, is_high_stress=False):
     n_name = n_zone.get_name()
     c_name = c_zone.get_name()
     
@@ -387,15 +384,33 @@ def calculate_dijkstra_weights(c_zone, n_zone, dead_end_names, distances_map, we
     )
     if has_restricted_neighbor and not n_zone.has_restricted():
         cost += weights.get("w_trap_proximity", 500.0)
-        
+
+    if is_high_stress:
+        current_drones = n_zone.get_nb_drones()
+        if n_zone.has_max_drones():
+            if current_drones > 0:
+                cost += weights.get("w_congestion", 200.0) * current_drones
+        else:
+            cost += current_drones * 10.0
+            
     return cost
 
 
-def run_turn_execution(o, weights, dead_end_names, distances_map, is_simulation=True, screen=None, clock=None, grid=None):
+def run_turn_execution(o, weights, dead_end_names, distances_map, is_high_stress=False, is_simulation=True, screen=None, clock=None, grid=None):
     zones = o.get_zones()
     goal = zones[-1]
     nb_drones = len(o.get_drones())
     
+    all_connections = []
+    seen_conns = set()
+    for z in zones:
+        for conn in z.get_connections():
+            if id(conn) not in seen_conns:
+                seen_conns.add(id(conn))
+                all_connections.append(conn)
+
+    # Diccionario estricto para recordar exactamente hacia qué extremo de la conexión se dirigía el dron
+    drone_connection_target = {}
     total_turns = 0
 
     while goal.get_nb_drones() < nb_drones:
@@ -403,50 +418,66 @@ def run_turn_execution(o, weights, dead_end_names, distances_map, is_simulation=
         drones_moved = set()
         total_turns += 1
 
+        # 1. REQUISITO OBLIGATORIO: Vaciar las conexiones exclusivamente hacia el destino registrado (el extremo opuesto al de entrada)
+        for connection in all_connections:
+            initial_conn = connection.get_nb_drones()
+            processed_conn = 0
+            
+            while connection.get_nb_drones() > 0 and processed_conn < initial_conn:
+                drone_to_move = connection.get_drones()[0]
+                if drone_to_move in drones_moved:
+                    break
+                
+                # Obtener de forma estricta el destino exacto al que se dirigía al entrar en la conexión
+                target_zone = drone_connection_target.get(drone_to_move)
+                if not target_zone:
+                    z1 = connection.get_zone_1()
+                    z2 = connection.get_zone_2()
+                    d1 = distances_map.get(z1.get_name(), float('inf'))
+                    d2 = distances_map.get(z2.get_name(), float('inf'))
+                    target_zone = z2 if d2 < d1 else z1
+                
+                if target_zone.has_max_drones():
+                    break
+                    
+                res = o.move_drone_from_connection_to_hub(target_zone, drone_to_move, connection)
+                if res: 
+                    turn_moves.append(res + " ")
+                    drones_moved.add(drone_to_move)
+                    drone_connection_target.pop(drone_to_move, None)
+                else:
+                    break
+                processed_conn += 1
+
+        # 2. Mover drones desde los hubs hacia adelante
         for zone in reversed(zones):
             connections = zone.get_connections()
 
             def get_cost(conn):
                 n_zone = conn.get_zone_2() if conn.get_zone_1() == zone else conn.get_zone_1()
-                return calculate_dijkstra_weights(zone, n_zone, dead_end_names, distances_map, weights)
+                return calculate_dijkstra_weights(zone, n_zone, dead_end_names, distances_map, weights, is_high_stress)
 
             connections = sorted(connections, key=get_cost)
-            has_preferred_exit_failed = False
 
             for connection in connections:
                 c_zone = zone
                 
-                if connection.get_zone_1() != c_zone:
+                if connection.get_zone_1() == c_zone:
+                    n_zone = connection.get_zone_2()
+                elif connection.get_zone_2() == c_zone:
+                    n_zone = connection.get_zone_1()
+                else:
                     continue
-                    
-                n_zone = connection.get_zone_2()
-                n_name = n_zone.get_name()
                 
-                # 1. Vaciar drones de conexiones restringidas
-                initial_conn = connection.get_nb_drones()
-                processed_conn = 0
-                while connection.get_nb_drones() > 0 and processed_conn < initial_conn:
-                    drone_to_move = connection.get_drones()[0]
-                    if drone_to_move in drones_moved or n_zone.has_max_drones():
-                        break
-                        
-                    res = o.move_drone_from_connection_to_hub(n_zone, drone_to_move, connection)
-                    if res: 
-                        turn_moves.append(res + " ")
-                        drones_moved.add(drone_to_move)
-                    else:
-                        break
-                    processed_conn += 1
+                n_name = n_zone.get_name()
 
-                # 2. Mover drones del hub origen hacia adelante
                 if n_name in dead_end_names or n_name not in distances_map:
                     continue
                     
                 d_current = distances_map.get(c_zone.get_name(), float('inf'))
                 d_target = distances_map.get(n_name, float('inf'))
-                is_loop_move = (d_target >= d_current)
                 
-                if has_preferred_exit_failed and is_loop_move:
+                if d_target >= d_current:
                     continue
 
                 initial_hub = c_zone.get_nb_drones()
@@ -469,12 +500,11 @@ def run_turn_execution(o, weights, dead_end_names, distances_map, is_simulation=
                     if res: 
                         turn_moves.append(res + " ")
                         drones_moved.add(drone_to_move)
+                        # Registrar inequívocamente que este dron entró desde c_zone y debe salir obligatoriamente hacia n_zone
+                        drone_connection_target[drone_to_move] = n_zone
                     else:
                         break
                     processed_hub += 1
-                    
-                if not is_loop_move and c_zone.get_nb_drones() > 0:
-                    has_preferred_exit_failed = True
 
         if turn_moves and not is_simulation:
             print("".join(turn_moves).strip())
@@ -498,24 +528,28 @@ def stoned_try(o: Orchestrator) -> None:
     dead_end_names = get_dead_ends(zones, start, goal)
     distances_map = compute_distances_to_goal(zones, goal)
 
+    nb_drones = len(o.get_drones())
+    restricted_count = sum(1 for z in zones if z.has_restricted())
+    is_high_stress = (nb_drones >= 20 and restricted_count >= 5)
+
     weight_candidates = [
-        {"w_loop": 50.0, "w_restricted": 500.0, "w_priority": 2.0},
-        {"w_loop": 100.0, "w_restricted": 1000.0, "w_priority": 5.0},
-        {"w_loop": 30.0, "w_restricted": 300.0, "w_priority": 3.0},
+        {"w_loop": 50.0, "w_restricted": 50.0, "w_priority": 2.0, "w_trap_proximity": 500.0, "w_congestion": 200.0},
+        {"w_loop": 100.0, "w_restricted": 100.0, "w_priority": 5.0, "w_trap_proximity": 1000.0, "w_congestion": 400.0},
+        {"w_loop": 30.0, "w_restricted": 30.0, "w_priority": 3.0, "w_trap_proximity": 300.0, "w_congestion": 100.0},
     ]
 
     best_turns = float('inf')
     best_weights = weight_candidates[0]
     consecutive_same_counter = 0
 
-    print("Calculando ruta óptima mediante simulación...")
-    for i, weights in enumerate(weight_candidates):
+    print(f"Modo High-Stress dinámico: {'ACTIVADO' if is_high_stress else 'DESACTIVADO'}")
+    for weights in weight_candidates:
         try:
             sim_orchestrator = copy.deepcopy(o)
         except Exception:
             break
             
-        turns = run_turn_execution(sim_orchestrator, weights, dead_end_names, distances_map, is_simulation=True)
+        turns = run_turn_execution(sim_orchestrator, weights, dead_end_names, distances_map, is_high_stress=is_high_stress, is_simulation=True)
 
         if turns == best_turns:
             consecutive_same_counter += 1
@@ -527,7 +561,6 @@ def stoned_try(o: Orchestrator) -> None:
             consecutive_same_counter = 0
 
         if consecutive_same_counter == 3:
-            print(f"Parada temprana activada en la iteración {i + 1}: Solución óptima estable.")
             break
 
     print(f"\n--- APLICANDO MEJOR SOLUCIÓN ENCONTRADA: {best_turns} TURNOS ---")
@@ -536,9 +569,9 @@ def stoned_try(o: Orchestrator) -> None:
         best_weights, 
         dead_end_names, 
         distances_map, 
+        is_high_stress=is_high_stress,
         is_simulation=False, 
         screen=screen, 
         clock=clock, 
         grid=grid
     )
-    
